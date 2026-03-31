@@ -11,9 +11,7 @@ const PORT = parseInt(process.env.PORT || '3000', 10)
 const app = express()
 app.use(express.json())
 
-app.all('/mcp', async (req, res) => {
-    const apiKey = (req.query.apiKey as string) || (req.headers['x-api-key'] as string) || process.env.AGENTMAIL_API_KEY
-
+function createMcpServer(apiKey: string | undefined) {
     const server = new McpServer({ name: 'AgentMail', version: '1.0.0' })
     const client = new AgentMailClient({ apiKey })
     const toolkit = new AgentMailToolkit(client)
@@ -29,10 +27,25 @@ app.all('/mcp', async (req, res) => {
         })
     }
 
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
-    res.on('close', () => transport.close())
-    await server.connect(transport)
-    await transport.handleRequest(req, res, req.body)
+    return server
+}
+
+app.all('/mcp', async (req, res) => {
+    try {
+        const apiKey = (req.query.apiKey as string) || (req.headers['x-api-key'] as string) || process.env.AGENTMAIL_API_KEY
+
+        const server = createMcpServer(apiKey)
+        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
+
+        res.on('close', () => transport.close())
+        await server.connect(transport)
+        await transport.handleRequest(req, res, req.body)
+    } catch (error) {
+        console.error('MCP request error:', error)
+        if (!res.headersSent) {
+            res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null })
+        }
+    }
 })
 
 app.get('/health', (_req, res) => {
