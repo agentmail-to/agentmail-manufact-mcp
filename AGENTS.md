@@ -9,9 +9,9 @@ version: '1.0.0'
 
 Welcome to the **AgentMail Remote MCP Server**!
 
-This is the remote (HTTP-hosted) MCP server for the AgentMail API, hosted on [Manufact Cloud](https://manufact.com) as a container deployment. It wraps `agentmail-toolkit` and exposes all AgentMail tools via the standard MCP protocol over Streamable HTTP transport.
+This is the remote (HTTP-hosted) MCP server for the AgentMail API, hosted on [Manufact Cloud](https://manufact.com). It wraps `agentmail-toolkit` and exposes all AgentMail tools via the standard MCP protocol over Streamable HTTP transport.
 
-**Important**: This server uses the **standard `@modelcontextprotocol/sdk`** and Express directly, not the Manufact/mcp-use server framework (`mcp-use/server`). Manufact is used purely as a hosting/deployment platform for the Docker container. This is intentional: it avoids an extra framework dependency and keeps the server as a thin, portable wrapper around `agentmail-toolkit`.
+**Important**: This server uses the **standard `@modelcontextprotocol/sdk`** and Express directly, not the Manufact/mcp-use server framework (`mcp-use/server`). Manufact runs the app from `package.json` (`build` / `start`); there is no committed `Dockerfile` so Manufact generates the build image (avoids Docker Hub pull issues on some builders). This keeps the repo a thin, portable wrapper around `agentmail-toolkit`.
 
 There is a separate **local** MCP server at [agentmail-mcp](https://github.com/agentmail-to/agentmail-mcp) that uses stdio transport and is distributed as an npm package (`npx agentmail-mcp`).
 
@@ -32,9 +32,8 @@ There is a separate **local** MCP server at [agentmail-mcp](https://github.com/a
 ```
 agentmail-manufact-mcp/
 ├── package.json           # Dependencies (pinned versions, no ^)
-├── pnpm-lock.yaml         # Lockfile (committed, used with --frozen-lockfile)
+├── pnpm-lock.yaml         # Lockfile (committed; Manufact uses frozen-lockfile)
 ├── tsconfig.json          # TypeScript config, outputs to ./build
-├── Dockerfile             # Container build for deployment
 ├── src/
 │   └── index.ts           # Main server implementation (Express + standard MCP SDK)
 ├── AGENTS.md
@@ -316,7 +315,7 @@ rm -rf build && pnpm run build
 
 - All versions are pinned (no `^`) to prevent supply chain attacks
 - Always audit after install: `pnpm audit`
-- Use `pnpm install --frozen-lockfile` in CI/CD (the Dockerfile already does this)
+- Use `pnpm install --frozen-lockfile` in CI/CD (Manufact’s build does this)
 - Check for unwanted transitive dependencies: `pnpm ls <package-name>`
 
 ## Resources
