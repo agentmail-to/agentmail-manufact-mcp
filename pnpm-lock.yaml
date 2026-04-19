@@ -15,8 +15,8 @@ importers:
         specifier: 0.4.10
         version: 0.4.10
       agentmail-toolkit:
-        specifier: 0.3.0
-        version: 0.3.0(@modelcontextprotocol/sdk@1.24.1(zod@4.1.13))
+        specifier: 0.3.1
+        version: 0.3.1(@modelcontextprotocol/sdk@1.24.1(zod@4.1.13))
       express:
         specifier: 5.2.1
         version: 5.2.1
@@ -83,8 +83,8 @@ packages:
     resolution: {integrity: sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng==}
     engines: {node: '>= 0.6'}
 
-  agentmail-toolkit@0.3.0:
-    resolution: {integrity: sha512-OeiYrYqxTm+t9MIaWZwao8L0P9TVoMZNvQLSAwU/AshgCoRdpLjvxvO2HqvuE2aLB3JOKykibw1K1ZS/jKtuHg==}
+  agentmail-toolkit@0.3.1:
+    resolution: {integrity: sha512-7UOld9giaZZzy6O5pyQDoFAfqc2zIkU0eFU4/uolF9T7eTmUJZTntiYuhqyFo+Fs8jqrN3KdxAP6opdHLOtVPA==}
     peerDependencies:
       '@modelcontextprotocol/sdk': ^1.24.1
       ai: ^6.0.0-beta.150
@@ -575,7 +575,7 @@ snapshots:
       mime-types: 3.0.2
       negotiator: 1.0.0
 
-  agentmail-toolkit@0.3.0(@modelcontextprotocol/sdk@1.24.1(zod@4.1.13)):
+  agentmail-toolkit@0.3.1(@modelcontextprotocol/sdk@1.24.1(zod@4.1.13)):
     dependencies:
       agentmail: 0.4.10
       jszip: 3.10.1

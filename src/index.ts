@@ -7,6 +7,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import express from 'express'
 
 const PORT = parseInt(process.env.PORT || '3000', 10)
+const DOCS_URL = 'https://docs.agentmail.to/integrations/mcp'
 
 const app = express()
 app.use(express.json())
@@ -30,7 +31,12 @@ function createMcpServer(apiKey: string | undefined) {
     return server
 }
 
-app.all('/mcp', async (req, res) => {
+const mcpHandler: express.RequestHandler = async (req, res) => {
+    // Browser GET requests: redirect to docs instead of showing raw MCP error
+    if (req.method === 'GET' && req.headers.accept?.includes('text/html')) {
+        return res.redirect(302, DOCS_URL)
+    }
+
     try {
         const apiKey = (req.query.apiKey as string) || (req.headers['x-api-key'] as string) || process.env.AGENTMAIL_API_KEY
 
@@ -46,13 +52,16 @@ app.all('/mcp', async (req, res) => {
             res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null })
         }
     }
-})
+}
 
 app.get('/health', (_req, res) => {
     res.json({ status: 'ok' })
 })
 
+app.all('/', mcpHandler)
+app.all('/mcp', mcpHandler)
+
 app.listen(PORT, () => {
     console.log(`AgentMail MCP server running on port ${PORT}`)
-    console.log(`MCP endpoint: http://localhost:${PORT}/mcp`)
+    console.log(`MCP endpoints: http://localhost:${PORT}/ and http://localhost:${PORT}/mcp`)
 })
