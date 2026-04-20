@@ -390,9 +390,32 @@ app.get('/health', (_req, res) => {
     })
 })
 
+// ============================================================================
+// Env var diagnostic (prints on boot to help debug Manufact injection issues).
+// We never print full secret values — only presence + length + prefix when
+// safe — so this is OK to leave in production.
+// ============================================================================
+
+function maskEnvVar(name: string): string {
+    const val = process.env[name]
+    if (!val) return `${name}: <missing>`
+    // Safe prefix for keys that have a documented public prefix (pk_, sk_, am_).
+    // For everything else we just report length.
+    const firstChars = val.slice(0, 7)
+    const safePrefix = /^(pk_|sk_|am_)/.test(firstChars) ? firstChars : '***'
+    return `${name}: present (len=${val.length}, prefix=${safePrefix})`
+}
+
 app.listen(PORT, () => {
     console.log(`AgentMail MCP server running on port ${PORT}`)
     console.log(`MCP endpoints: http://localhost:${PORT}/ and http://localhost:${PORT}/mcp`)
     console.log(`Clerk OAuth: ${CLERK_ENABLED ? 'enabled' : 'disabled (no CLERK_* env vars)'}`)
     console.log(`AgentMail API: ${AGENTMAIL_API_URL ?? '(SDK default)'}`)
+    console.log('--- env var diagnostic ---')
+    console.log(maskEnvVar('CLERK_PUBLISHABLE_KEY'))
+    console.log(maskEnvVar('CLERK_SECRET_KEY'))
+    console.log(maskEnvVar('CONSOLE_JWT_PRIVATE_KEY'))
+    console.log(maskEnvVar('AGENTMAIL_API_URL'))
+    console.log(maskEnvVar('AGENTMAIL_API_KEY'))
+    console.log('--------------------------')
 })
