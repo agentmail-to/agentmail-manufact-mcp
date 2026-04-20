@@ -51,6 +51,23 @@ const AGENTMAIL_WS_URL = AGENTMAIL_API_URL?.replace('https://api.', 'wss://ws.')
 
 const CLERK_ENABLED = Boolean(process.env.CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY)
 
+// Public URL of this MCP server (the URL that outside clients hit).
+// Optional. When set, we force Express + @clerk/mcp-tools to use this as the
+// base URL when composing self-referential URLs (WWW-Authenticate
+// resource_metadata pointer, /.well-known/oauth-protected-resource body, etc).
+//
+// Required in deployments behind reverse proxies that rewrite the Host header
+// to an internal hostname (fly.io does this — req.headers.host becomes
+// mcp-cXXXX-N.fly.dev, which clients can't reach). Without MCP_PUBLIC_URL set
+// in those environments, we'd emit a 401 WWW-Authenticate pointing to a
+// hostname only reachable from inside fly's network.
+//
+// Examples:
+//   Preview:     MCP_PUBLIC_URL=https://dark-paper-219t9--br-feat-clerk-oauth.run.mcp-use.com
+//   Production:  MCP_PUBLIC_URL=https://mcp.agentmail.to
+//   Local:       (don't set — Express uses localhost:3000 correctly)
+const MCP_PUBLIC_URL = process.env.MCP_PUBLIC_URL?.replace(/\/$/, '')
+
 // ============================================================================
 // Console JWT signer
 // (ported from agentmail-web/apps/console/app/lib/agentmail-jwt.server.ts)
@@ -333,23 +350,50 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
 }
 
 // ============================================================================
+// Public URL normalization middleware
+//
+// When MCP_PUBLIC_URL is set (deployed environments behind proxies that
+// rewrite Host to an internal hostname), we force Express to believe the
+// request arrived at the public URL. This is necessary because
+// @clerk/mcp-tools composes its WWW-Authenticate header's resource_metadata
+// URL, and the /.well-known/oauth-protected-resource response body, from
+// req.headers.host + req.protocol. No amount of `trust proxy` helps if the
+// proxy doesn't forward X-Forwarded-Host (fly.io's default).
+//
+// By overriding req.headers.host and setting x-forwarded-proto = https, all
+// downstream code (including Clerk's URL composition) sees the public URL.
+// The request body, query, method, and auth semantics are unchanged.
+// ============================================================================
+
+function publicUrlOverride(req: express.Request, _res: express.Response, next: express.NextFunction) {
+    if (!MCP_PUBLIC_URL) return next()
+    try {
+        const parsed = new URL(MCP_PUBLIC_URL)
+        req.headers.host = parsed.host
+        req.headers['x-forwarded-host'] = parsed.host
+        req.headers['x-forwarded-proto'] = parsed.protocol.replace(':', '')
+    } catch {
+        // MCP_PUBLIC_URL malformed — log once at boot and fall through.
+    }
+    next()
+}
+
+// ============================================================================
 // Express app
 // ============================================================================
 
 const app = express()
 
-// Trust the reverse proxy in front of us (Manufact/Cloudflare/fly.io). Without
-// this, Express's req.protocol / req.hostname / req.ip resolve to the inner
-// fly.io machine hostname (mcp-cXXXXXXXX-N.fly.dev) and http, not the public
-// https URL the client actually used. @clerk/mcp-tools composes its
-// WWW-Authenticate header and the /.well-known resource_metadata URL from
-// those fields, so without trust proxy it would emit
-//   WWW-Authenticate: Bearer resource_metadata=http://mcp-cXXXX.fly.dev/...
-// which Claude Desktop (and any spec-conforming MCP client) can't reach
-// because it's an internal hostname over plain http. 'trust proxy = true'
-// tells Express to believe X-Forwarded-Proto / X-Forwarded-Host, which the
-// upstream proxy sets correctly.
+// Trust the reverse proxy in front of us (Manufact/Cloudflare/fly.io).
+// With this, Express respects X-Forwarded-Proto / X-Forwarded-Host when
+// those headers are present. For environments where the proxy doesn't
+// forward Host reliably (fly.io preview), the publicUrlOverride middleware
+// below provides a stronger fallback using the MCP_PUBLIC_URL env var.
 app.set('trust proxy', true)
+
+// Normalize req.headers.host to MCP_PUBLIC_URL if set. Must run BEFORE cors
+// and clerkMiddleware so they see the normalized URL.
+app.use(publicUrlOverride)
 
 app.use(cors({ exposedHeaders: ['WWW-Authenticate'] }))
 if (CLERK_ENABLED) {
@@ -400,6 +444,7 @@ app.get('/health', (_req, res) => {
         status: 'ok',
         clerk_enabled: CLERK_ENABLED,
         agentmail_api_url: AGENTMAIL_API_URL ?? '(SDK default)',
+        mcp_public_url: MCP_PUBLIC_URL ?? '(not set, using Host header)',
     })
 })
 
@@ -424,11 +469,13 @@ app.listen(PORT, () => {
     console.log(`MCP endpoints: http://localhost:${PORT}/ and http://localhost:${PORT}/mcp`)
     console.log(`Clerk OAuth: ${CLERK_ENABLED ? 'enabled' : 'disabled (no CLERK_* env vars)'}`)
     console.log(`AgentMail API: ${AGENTMAIL_API_URL ?? '(SDK default)'}`)
+    console.log(`Public URL override: ${MCP_PUBLIC_URL ?? '(not set, using Host header)'}`)
     console.log('--- env var diagnostic ---')
     console.log(maskEnvVar('CLERK_PUBLISHABLE_KEY'))
     console.log(maskEnvVar('CLERK_SECRET_KEY'))
     console.log(maskEnvVar('CONSOLE_JWT_PRIVATE_KEY'))
     console.log(maskEnvVar('AGENTMAIL_API_URL'))
     console.log(maskEnvVar('AGENTMAIL_API_KEY'))
+    console.log(maskEnvVar('MCP_PUBLIC_URL'))
     console.log('--------------------------')
 })
