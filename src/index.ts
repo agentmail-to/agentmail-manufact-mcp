@@ -22,7 +22,7 @@
 
 import express from 'express'
 import cors from 'cors'
-import { clerkClient, clerkMiddleware, getAuth } from '@clerk/express'
+import { clerkClient, clerkMiddleware } from '@clerk/express'
 import {
     mcpAuthClerk,
     protectedResourceHandlerClerk,
@@ -330,18 +330,20 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
     if (CLERK_ENABLED) {
         return mcpAuthClerk(req, res, (err) => {
             if (err) return next(err)
-            // mcpAuthClerk validates the Bearer token (Clerk OAuth JWT) and,
-            // when successful, exposes the userId via @clerk/express's
-            // getAuth(req) helper. In @clerk/express v2, getAuth is an
-            // imported function, NOT a method on req.auth (that was v1).
-            // We swallow any throw from getAuth because mcpAuthClerk might
-            // have passed on a 401 earlier.
-            let userId: string | null | undefined
-            try {
-                userId = getAuth(req).userId
-            } catch {
-                userId = undefined
-            }
+            // mcpAuthClerk (from @clerk/mcp-tools) validates the Bearer token
+            // as a Clerk OAuth access token and, on success, writes an MCP SDK
+            // AuthInfo object directly to req.auth, OVERWRITING the function
+            // set earlier by clerkMiddleware. The AuthInfo shape is:
+            //   { token, scopes, clientId, extra: { userId } }
+            // (see verifyClerkToken in @clerk/mcp-tools/dist/chunk-H4BXCCRK.js)
+            //
+            // IMPORTANT: do NOT use getAuth(req) from @clerk/express here —
+            // that helper calls req.auth(options) expecting a session-token
+            // getter function, but mcpAuthClerk has replaced req.auth with a
+            // plain object, so getAuth() throws "TypeError: req.auth is not
+            // a function". Read the userId directly from req.auth.extra.
+            const authInfo = (req as unknown as { auth?: { extra?: { userId?: string } } }).auth
+            const userId = authInfo?.extra?.userId
             if (userId) {
                 req.authSource = { kind: 'clerk', clerkUserId: userId }
             } else {
