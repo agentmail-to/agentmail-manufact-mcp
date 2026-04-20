@@ -5,8 +5,8 @@
     "type": "module",
     "scripts": {
         "build": "tsc",
-        "start": "node build/index.js",
-        "dev": "tsc && tsc --watch & node --watch build/index.js"
+        "start": "node --env-file-if-exists=.env build/index.js",
+        "dev": "tsc && tsc --watch & node --env-file-if-exists=.env --watch build/index.js"
     },
     "dependencies": {
         "@clerk/express": "2.1.5",

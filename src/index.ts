@@ -338,6 +338,19 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
 
 const app = express()
 
+// Trust the reverse proxy in front of us (Manufact/Cloudflare/fly.io). Without
+// this, Express's req.protocol / req.hostname / req.ip resolve to the inner
+// fly.io machine hostname (mcp-cXXXXXXXX-N.fly.dev) and http, not the public
+// https URL the client actually used. @clerk/mcp-tools composes its
+// WWW-Authenticate header and the /.well-known resource_metadata URL from
+// those fields, so without trust proxy it would emit
+//   WWW-Authenticate: Bearer resource_metadata=http://mcp-cXXXX.fly.dev/...
+// which Claude Desktop (and any spec-conforming MCP client) can't reach
+// because it's an internal hostname over plain http. 'trust proxy = true'
+// tells Express to believe X-Forwarded-Proto / X-Forwarded-Host, which the
+// upstream proxy sets correctly.
+app.set('trust proxy', true)
+
 app.use(cors({ exposedHeaders: ['WWW-Authenticate'] }))
 if (CLERK_ENABLED) {
     app.use(clerkMiddleware())
