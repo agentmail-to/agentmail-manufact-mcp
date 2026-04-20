@@ -22,7 +22,7 @@
 
 import express from 'express'
 import cors from 'cors'
-import { clerkClient, clerkMiddleware } from '@clerk/express'
+import { clerkClient, clerkMiddleware, getAuth } from '@clerk/express'
 import {
     mcpAuthClerk,
     protectedResourceHandlerClerk,
@@ -330,11 +330,18 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
     if (CLERK_ENABLED) {
         return mcpAuthClerk(req, res, (err) => {
             if (err) return next(err)
-            // mcpAuthClerk attaches authInfo to req via the MCP SDK's
-            // streamableHttpHandler convention. The userId is also visible
-            // through Clerk's req.auth() helper because clerkMiddleware ran.
-            const auth = (req as unknown as { auth?: () => { userId?: string | null } }).auth?.()
-            const userId = auth?.userId
+            // mcpAuthClerk validates the Bearer token (Clerk OAuth JWT) and,
+            // when successful, exposes the userId via @clerk/express's
+            // getAuth(req) helper. In @clerk/express v2, getAuth is an
+            // imported function, NOT a method on req.auth (that was v1).
+            // We swallow any throw from getAuth because mcpAuthClerk might
+            // have passed on a 401 earlier.
+            let userId: string | null | undefined
+            try {
+                userId = getAuth(req).userId
+            } catch {
+                userId = undefined
+            }
             if (userId) {
                 req.authSource = { kind: 'clerk', clerkUserId: userId }
             } else {
