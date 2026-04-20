@@ -34,6 +34,7 @@ The server runs at `http://localhost:3000/mcp`.
 | `CONSOLE_JWT_PRIVATE_KEY`    | OAuth path                  | Same ES256 PEM the console uses for `agentmail-api` audience JWTs  |
 | `AGENTMAIL_API_URL`          | OAuth path                  | e.g. `https://api.agentmail.sh` (staging), `https://api.agentmail.to` (prod) |
 | `AGENTMAIL_API_KEY`          | API key path (server-wide)  | Optional fallback if no per-request key is provided                |
+| `MCP_PUBLIC_URL`             | OAuth path behind proxy     | Public URL of this server (`https://mcp.agentmail.to` in prod, `https://<preview-id>.run.mcp-use.com` for previews). Required when the upstream proxy doesn't forward `Host` (fly.io). Don't set locally. |
 
 If `CLERK_PUBLISHABLE_KEY` and `CLERK_SECRET_KEY` are absent, OAuth is disabled and the server only serves the API key path (legacy behavior).
 

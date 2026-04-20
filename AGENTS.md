@@ -113,6 +113,7 @@ Clerk's middleware returns 401 + `WWW-Authenticate`, which prompts MCP-aware cli
 | `CONSOLE_JWT_PRIVATE_KEY` | OAuth path               | Same ES256 PEM as `agentmail-web/apps/console/.env.local` for that environment   |
 | `AGENTMAIL_API_URL`       | OAuth path (recommended) | e.g. `https://api.agentmail.sh` (staging), `https://api.agentmail.to` (prod)     |
 | `AGENTMAIL_API_KEY`       | API key path (optional)  | Server-wide fallback API key. Most users pass per-request keys instead.          |
+| `MCP_PUBLIC_URL`          | OAuth path behind proxy  | Public URL of this server (`https://mcp.agentmail.to` in prod, `https://<preview-id>.run.mcp-use.com` for previews). Required when the upstream proxy doesn't forward `Host` (fly.io rewrites it to an internal hostname). Leave unset locally. |
 
 If `CLERK_PUBLISHABLE_KEY` and `CLERK_SECRET_KEY` are both unset, the OAuth path is **disabled** and the server runs in legacy API-key-only mode. This is intentional so the server still boots with no Clerk config (e.g. local quick-test).
 
@@ -243,6 +244,7 @@ For the OAuth path to work in prod, set these on the production deployment:
 - `CLERK_SECRET_KEY` (prod `sk_live_...`)
 - `CONSOLE_JWT_PRIVATE_KEY` (prod ES256 PEM)
 - `AGENTMAIL_API_URL=https://api.agentmail.to`
+- `MCP_PUBLIC_URL=https://mcp.agentmail.to` (preview deploys: `https://<preview-id>.run.mcp-use.com`)
 
 `PORT` is auto-injected. `AGENTMAIL_API_KEY` is optional (most users pass per-request).
 

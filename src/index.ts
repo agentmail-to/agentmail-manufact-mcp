@@ -63,7 +63,7 @@ const CLERK_ENABLED = Boolean(process.env.CLERK_PUBLISHABLE_KEY && process.env.C
 // hostname only reachable from inside fly's network.
 //
 // Examples:
-//   Preview:     MCP_PUBLIC_URL=https://dark-paper-219t9--br-feat-clerk-oauth.run.mcp-use.com
+//   Preview:     MCP_PUBLIC_URL=https://<preview-id>.run.mcp-use.com
 //   Production:  MCP_PUBLIC_URL=https://mcp.agentmail.to
 //   Local:       (don't set — Express uses localhost:3000 correctly)
 const MCP_PUBLIC_URL = process.env.MCP_PUBLIC_URL?.replace(/\/$/, '')
@@ -315,7 +315,12 @@ declare module 'express-serve-static-core' {
 function extractApiKey(req: express.Request): string | undefined {
     const fromQuery = req.query.apiKey as string | undefined
     const fromHeader = req.headers['x-api-key'] as string | undefined
-    const fromEnv = process.env.AGENTMAIL_API_KEY
+    // Server-wide AGENTMAIL_API_KEY is the lowest-priority fallback and ONLY
+    // applies when the request has no Authorization header. Without this
+    // guard, an inbound Clerk OAuth Bearer token would be silently shadowed
+    // by AGENTMAIL_API_KEY and the request would be processed as that key's
+    // owner instead of the OAuth user's identity.
+    const fromEnv = req.headers.authorization ? undefined : process.env.AGENTMAIL_API_KEY
     return fromQuery || fromHeader || fromEnv
 }
 
