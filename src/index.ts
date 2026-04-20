@@ -58,13 +58,42 @@ const CLERK_ENABLED = Boolean(process.env.CLERK_PUBLISHABLE_KEY && process.env.C
 // The AgentMail backend trusts ES256 JWTs signed by CONSOLE_JWT_PRIVATE_KEY
 // with issuer=agentmail-console, audience=agentmail-api, subject=<orgId>.
 // This is the same auth path the console uses every request.
+//
+// The env var CONSOLE_JWT_PRIVATE_KEY accepts EITHER:
+//   - A raw multi-line PEM string (works for local .env files where
+//     newlines are preserved)
+//   - A single-line base64-encoded PEM (works for hosting platforms like
+//     Manufact whose env var UI doesn't accept multi-line values)
+// We auto-detect by sniffing for the PEM header.
 // ============================================================================
 
+function decodeConsoleJwtPem(envValue: string): string {
+    // Raw PEM: starts with "-----BEGIN" (after possible whitespace).
+    if (envValue.trimStart().startsWith('-----BEGIN')) {
+        return envValue
+    }
+    // Otherwise treat as base64. Decode and validate the result looks like a PEM.
+    let decoded: string
+    try {
+        decoded = Buffer.from(envValue, 'base64').toString('utf8')
+    } catch (error) {
+        throw new Error(`CONSOLE_JWT_PRIVATE_KEY is not raw PEM and base64 decode failed: ${error}`)
+    }
+    if (!decoded.trimStart().startsWith('-----BEGIN')) {
+        throw new Error(
+            'CONSOLE_JWT_PRIVATE_KEY does not look like raw PEM or base64-encoded PEM. ' +
+                'Expected the decoded value to start with "-----BEGIN".'
+        )
+    }
+    return decoded
+}
+
 function getConsoleJwtKeyObject() {
-    const pem = process.env.CONSOLE_JWT_PRIVATE_KEY
-    if (!pem) {
+    const raw = process.env.CONSOLE_JWT_PRIVATE_KEY
+    if (!raw) {
         throw new Error('CONSOLE_JWT_PRIVATE_KEY env var is required to use OAuth path')
     }
+    const pem = decodeConsoleJwtPem(raw)
     try {
         return crypto.createPrivateKey({ key: pem, format: 'pem' })
     } catch (error) {
@@ -245,7 +274,7 @@ function createMcpServer(auth: AuthSource): McpServer {
 // Auth detection middleware
 //
 // Decides which auth path a request is on, BEFORE Clerk's mcpAuthClerk gets
-// to reject it. Sets req.locals.authSource for downstream use.
+// to reject it. Sets req.authSource for downstream use.
 //
 //   1. Has ?apiKey or x-api-key or env AGENTMAIL_API_KEY  → AuthSource.apiKey
 //      (skip Clerk entirely; this is the legacy fast path)
