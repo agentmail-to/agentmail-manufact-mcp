@@ -1,8 +1,8 @@
 ---
 title: AgentMail Remote MCP Server
-description: TypeScript MCP server wrapping agentmail-toolkit, hosted on Manufact Cloud. Uses the standard MCP SDK with Streamable HTTP transport (not the mcp-use server framework).
+description: TypeScript MCP server wrapping agentmail-toolkit, hosted on Manufact Cloud. Supports both API-key auth (legacy) and Clerk OAuth (modern, MCP 2025-06-18 spec).
 overview: Remote MCP server for the AgentMail API. Run `pnpm run build && pnpm run start` to start locally, or deploy to Manufact Cloud via CLI or GitHub repo.
-version: '1.0.0'
+version: '1.1.0'
 ---
 
 # AGENTS.md
@@ -19,6 +19,7 @@ There is a separate **local** MCP server at [agentmail-mcp](https://github.com/a
 
 - [Project Structure](#project-structure)
 - [Quick Start Commands](#quick-start-commands)
+- [Authentication](#authentication)
 - [Configuration](#configuration)
 - [Architecture](#architecture)
 - [Concepts](#concepts)
@@ -35,7 +36,8 @@ agentmail-manufact-mcp/
 ├── pnpm-lock.yaml         # Lockfile (committed; Manufact uses frozen-lockfile)
 ├── tsconfig.json          # TypeScript config, outputs to ./build
 ├── src/
-│   └── index.ts           # Main server implementation (Express + standard MCP SDK)
+│   └── index.ts           # Main server implementation (Express + standard MCP SDK + Clerk OAuth)
+├── .env.example           # Local dev env template
 ├── AGENTS.md
 └── README.md
 ```
@@ -45,6 +47,9 @@ agentmail-manufact-mcp/
 ```bash
 # Install dependencies
 pnpm install
+
+# First time: copy env template and fill in Clerk + console JWT secrets
+cp .env.example .env
 
 # Build TypeScript to ./build
 pnpm run build
@@ -62,268 +67,221 @@ PORT=8080 pnpm run start
 lsof -ti:3000 | xargs kill
 ```
 
+## Authentication
+
+Two paths are supported, checked in order on every request:
+
+### 1. API key (legacy fast path)
+
+Sources, in priority order:
+
+- URL query parameter: `http://localhost:3000/mcp?apiKey=YOUR_KEY`
+- HTTP header: `x-api-key: YOUR_KEY`
+- Environment variable: `AGENTMAIL_API_KEY`
+
+If any of these is present, the server skips Clerk entirely and hands the key straight to `AgentMailClient`. This preserves the original behavior so existing Cursor users don't break.
+
+### 2. Clerk OAuth (modern MCP 2025-06-18 path)
+
+For clients that follow the [MCP OAuth spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization) (Claude Desktop, Claude Code, Claude Web, MCP Inspector):
+
+1. Client hits `/mcp` with no auth → server returns 401 + `WWW-Authenticate: Bearer resource_metadata=...`
+2. Client fetches `/.well-known/oauth-protected-resource/mcp` → discovers our Clerk authorization server
+3. Client fetches Clerk's `/.well-known/openid-configuration` → discovers DCR + auth + token endpoints
+4. Client self-registers via Clerk Dynamic Client Registration (`POST /oauth/register`)
+5. User goes through Clerk login + consent in browser
+6. Client exchanges authorization code for a Clerk OAuth access token (JWT)
+7. Client sends `Authorization: Bearer <Clerk JWT>` on subsequent MCP calls
+8. Server validates the Clerk JWT (via `mcpAuthClerk` from `@clerk/mcp-tools`), extracts the user ID
+9. Per tool call: server looks up the user's first Clerk org → resolves to AgentMail `internalOrgId` (from Clerk org metadata cache, or via `GET /v0/auth/internal-org`) → signs an ES256 console JWT scoped to that org → uses it to call the AgentMail backend
+
+Both paths land in the same `agentmail-toolkit` tool set; only the `AgentMailClient` construction differs.
+
+### When neither auth source is present
+
+Clerk's middleware returns 401 + `WWW-Authenticate`, which prompts MCP-aware clients to start the OAuth discovery flow. Pre-OAuth clients (curl, custom scripts) just see 401 with an `Unauthorized` body.
+
 ## Configuration
 
-### API Key
+### Environment variables
 
-This server needs an AgentMail API key to make API calls. The key is read per-request from three sources (highest to lowest priority):
+| Variable                  | Used by                  | Notes                                                                            |
+| ------------------------- | ------------------------ | -------------------------------------------------------------------------------- |
+| `PORT`                    | always                   | Manufact injects this in production (default 3000 locally)                       |
+| `CLERK_PUBLISHABLE_KEY`   | OAuth path               | `pk_test_...` (dev Clerk instance) or `pk_live_...` (prod). Both required for OAuth. |
+| `CLERK_SECRET_KEY`        | OAuth path               | `sk_test_...` or `sk_live_...`                                                   |
+| `CONSOLE_JWT_PRIVATE_KEY` | OAuth path               | Same ES256 PEM as `agentmail-web/apps/console/.env.local` for that environment   |
+| `AGENTMAIL_API_URL`       | OAuth path (recommended) | e.g. `https://api.agentmail.sh` (staging), `https://api.agentmail.to` (prod)     |
+| `AGENTMAIL_API_KEY`       | API key path (optional)  | Server-wide fallback API key. Most users pass per-request keys instead.          |
+| `MCP_PUBLIC_URL`          | OAuth path behind proxy  | Public URL of this server (`https://mcp.agentmail.to` in prod, `https://<preview-id>.run.mcp-use.com` for previews). Required when the upstream proxy doesn't forward `Host` (fly.io rewrites it to an internal hostname). Leave unset locally. |
 
-1. **URL query parameter**: `http://localhost:3000/mcp?apiKey=YOUR_KEY`
-2. **HTTP header**: `x-api-key: YOUR_KEY`
-3. **Environment variable**: `AGENTMAIL_API_KEY`
+If `CLERK_PUBLISHABLE_KEY` and `CLERK_SECRET_KEY` are both unset, the OAuth path is **disabled** and the server runs in legacy API-key-only mode. This is intentional so the server still boots with no Clerk config (e.g. local quick-test).
 
-Note: The `initialize` and `tools/list` MCP methods do not require an API key. Only `tools/call` (actually executing a tool) checks for a valid key.
+### Clerk dashboard setup (one-time, per Clerk instance)
 
-**Why this design:**
+Required for the OAuth path:
 
-- **Multi-user support**: Different users connect with different API keys via query params
-- **Security**: API keys are per-request, not stored server-wide
-- **Flexibility**: Users can configure at connection time without code changes
+1. Go to <https://dashboard.clerk.com/> → select the AgentMail instance
+2. Navigate to **OAuth applications → Settings**
+3. Toggle **Dynamic client registration** ON (required for Claude Desktop / Claude Web / Inspector self-registration)
+4. Toggle **Generate access tokens as JWTs** ON (required so `mcpAuthClerk` can validate the token signature locally)
 
-### Port
-
-The server port is configured via the `PORT` environment variable (default: `3000`). Manufact injects this automatically during deployment.
-
-### x402 Pay-Per-Use (Not Yet Supported)
-
-AgentMail also supports [x402](https://docs.agentmail.to/integrations/x402), an open payment protocol that lets agents pay for API usage directly over HTTP without API keys. This server currently only supports API key authentication. x402 support would require passing an `x402` client to `AgentMailClient` instead of an `apiKey`, which is a potential future addition.
+Repeat for both dev and prod Clerk instances.
 
 ## Architecture
 
-### How It Works
+### How a request flows
 
-`src/index.ts` is the only source file. It defines a `createMcpServer(apiKey)` function that:
+```
+Client → /mcp
+  ↓
+authRouter middleware:
+  - Extract API key from query/header/env. If present:
+      → req.authSource = { kind: 'apiKey', apiKey }
+      → next()
+  - Otherwise (and Clerk is configured):
+      → run mcpAuthClerk middleware (validates Clerk JWT or returns 401)
+      → if userId resolved:
+          req.authSource = { kind: 'clerk', clerkUserId }
+        else:
+          req.authSource = { kind: 'none' }
+      → next()
+  ↓
+mcpHandler:
+  - createMcpServer(req.authSource)
+      Each tool callback resolves the AgentMailClient at call time:
+        - kind: 'apiKey' → new AgentMailClient({ apiKey })
+        - kind: 'clerk'  → resolve user's first org → console JWT → AgentMailClient
+        - kind: 'none'   → return "please authenticate" message
+  - Connect server to a fresh StreamableHTTPServerTransport
+  - Handle the request
+```
 
-1. Creates an `McpServer` instance (standard MCP SDK)
-2. Initializes an `AgentMailClient` with the provided API key
-3. Wraps it in an `AgentMailToolkit` and registers all tools
+### Why per-call client construction
 
-The Express server calls this function on each request to `/mcp`, then connects the MCP server to a `StreamableHTTPServerTransport` to handle the JSON-RPC message.
+The OAuth path needs to:
 
-**All tool logic lives in the `agentmail-toolkit` npm package.** This server has zero custom tool implementations: it is purely a hosting/transport wrapper.
+1. Look up the user's Clerk org membership (network call)
+2. Maybe call `/v0/auth/internal-org` (network call)
+3. Sign a fresh ES256 JWT
 
-### Why Standard MCP SDK Instead of mcp-use Framework
+We don't want to do this on `tools/list` (every client does this on connect — adds latency for nothing). We only do it inside `tools/call`.
 
-We use `@modelcontextprotocol/sdk` directly instead of Manufact's `mcp-use/server` framework because:
+### Why standard MCP SDK instead of mcp-use framework
 
-- **No extra dependency**: Fewer moving parts, fewer things to break
-- **Portability**: If we ever move off Manufact, zero code changes needed
-- **Compatibility**: `agentmail-toolkit` already targets the standard MCP SDK's `McpServer.registerTool` API
-- **Simplicity**: The server is a thin wrapper, it does not need the mcp-use framework's inspector, HMR, or session management features
+Same reasons as before: no extra dependency, portability if we move off Manufact, compatibility with how `agentmail-toolkit` registers tools, and simplicity.
 
 ### Key Dependencies
 
-| Package | Purpose |
-|---------|---------|
-| `@modelcontextprotocol/sdk` | Standard MCP server SDK (McpServer, StreamableHTTPServerTransport) |
-| `agentmail` | AgentMail API client |
-| `agentmail-toolkit` | Provides all MCP tools (list_inboxes, send_message, etc.) |
-| `express` | HTTP framework for serving the MCP endpoint |
-| `zod` | Schema validation (used by MCP SDK and toolkit) |
+| Package                       | Purpose                                                             |
+| ----------------------------- | ------------------------------------------------------------------- |
+| `@modelcontextprotocol/sdk`   | Standard MCP server SDK                                             |
+| `agentmail`                   | AgentMail API client                                                |
+| `agentmail-toolkit`           | Provides all MCP tools                                              |
+| `@clerk/express`              | Clerk middleware for Express (`clerkMiddleware`, `clerkClient`)     |
+| `@clerk/mcp-tools`            | Clerk's MCP OAuth helpers (`mcpAuthClerk`, metadata handlers)       |
+| `express`                     | HTTP framework                                                      |
+| `cors`                        | Required so MCP clients can read the `WWW-Authenticate` header      |
+| `jose`                        | JWT signing for the console JWT                                     |
+| `zod`                         | Schema validation (used by MCP SDK and toolkit)                     |
 
-All dependency versions are **pinned** (no `^` prefix) to prevent supply chain attacks from affecting builds.
+All dependency versions are **pinned** (no `^` prefix) to prevent supply chain attacks.
+
+The `pnpm.peerDependencyRules.ignoreMissing` block in `package.json` silences warnings about `pg`, `redis`, and `better-sqlite3` peer deps from `@clerk/mcp-tools`. Those are storage backends for the MCP **client** side; we use the server side only.
 
 ## Concepts
 
-### What This Server Exposes
-
-This server registers all tools from `agentmail-toolkit`. It currently does **not** register any resources or prompts (these are MCP features that could be added in the future).
-
-The tool registration pattern:
-
-```typescript
-const toolkit = new AgentMailToolkit(client)
-
-for (const tool of toolkit.getTools()) {
-    server.registerTool(tool.name, tool, async (args, extra) => {
-        if (!apiKey) return apiKeyMessage
-        return tool.callback(args, extra)
-    })
-}
-```
-
-### MCP Components Reference
-
-For context, MCP servers can expose three types of components. This server only uses tools, but here is a reference for future additions:
-
-- **Tools**: Executable functions that AI applications invoke to perform actions (e.g., send_message, list_inboxes). This is what `agentmail-toolkit` provides.
-- **Resources**: Read-only data sources that give AI applications context without side effects (e.g., documentation, reference data). Not currently used.
-- **Prompts**: Reusable message templates that help structure conversations (e.g., "compose an email to X about Y"). Not currently used.
-
-### Transport
-
-This server uses **Streamable HTTP transport** from the standard MCP SDK.
-
-```typescript
-const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
-res.on('close', () => transport.close())
-await server.connect(transport)
-await transport.handleRequest(req, res, req.body)
-```
-
-The `/mcp` endpoint handles GET (SSE connections), POST (JSON-RPC messages), and DELETE (session close) via `app.all`. `sessionIdGenerator: undefined` means stateless mode: each request is independent.
-
-**Why stateless**: This server is a thin API proxy. All state lives in the AgentMail API backend. No session tracking is needed.
-
-**Comparison with local server**: The [agentmail-mcp](https://github.com/agentmail-to/agentmail-mcp) package uses **stdio transport** instead, communicating via stdin/stdout when spawned as a local process by Claude Desktop, Cursor, etc.
+(unchanged from previous version — see git history for the original tools/resources/prompts reference)
 
 ## Development Workflow
 
-### Testing Your Server: Three Approaches
-
-All approaches require running `pnpm run build && pnpm run start` first.
-
-#### MCP Inspector
-
-Use the official MCP Inspector to test interactively:
+### Testing locally (API key path)
 
 ```bash
+pnpm run build && pnpm run start
 npx @modelcontextprotocol/inspector http://localhost:3000/mcp?apiKey=YOUR_KEY
 ```
 
-Opens a browser UI where you can test tools, explore capabilities, and view request/response details.
+### Testing locally (Clerk OAuth path)
 
-**Best for:** Quick iteration, UI testing, tool validation
+1. Make sure `.env` has `CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `CONSOLE_JWT_PRIVATE_KEY`, `AGENTMAIL_API_URL`
+2. `pnpm run build && pnpm run start`
+3. Inspector:
+   ```bash
+   npx @modelcontextprotocol/inspector
+   ```
+   - Transport: Streamable HTTP
+   - URL: `http://localhost:3000/mcp` (no `?apiKey=`)
+   - Click Connect → Open Auth Settings → Quick OAuth Flow
+   - Sign in with Clerk, approve consent
+   - List Tools, run any tool
 
-#### Custom Clients
+### Testing with Claude Desktop locally
 
-Connect any MCP client to `http://localhost:3000/mcp` with config as URL parameters:
-
-```
-http://localhost:3000/mcp?apiKey=YOUR_KEY
-```
-
-For remote testing, use a tunnel like ngrok:
-
-```bash
-ngrok http 3000
-# Then connect to: https://your-ngrok-id.ngrok.io/mcp?apiKey=YOUR_KEY
-```
-
-**Best for:** Testing with Claude Desktop, Cursor, or other MCP clients
-
-#### Direct Protocol Testing (curl)
-
-For deep debugging or understanding the MCP protocol:
-
-1. Initialize connection:
+Claude Desktop requires HTTPS. Tunnel via ngrok:
 
 ```bash
-curl -X POST "http://localhost:3000/mcp" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"clientInfo":{"name":"test-client","version":"1.0.0"}}}'
+npx ngrok http 3000
 ```
 
-2. List available tools:
-
-```bash
-curl -X POST "http://localhost:3000/mcp?apiKey=YOUR_KEY" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
-```
-
-3. Call a tool:
-
-```bash
-curl -X POST "http://localhost:3000/mcp?apiKey=YOUR_KEY" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_inboxes","arguments":{}}}'
-```
-
-**Best for:** Protocol debugging, understanding MCP internals, automated testing scripts
-
-### Customizing the Server
-
-1. **Add new tools**: Either add them to `agentmail-toolkit` (shared with the local server) or register them directly in `src/index.ts` inside `createMcpServer()`
-2. **Add resources or prompts**: Register them on the `server` object inside `createMcpServer()` before returning
-3. **Update toolkit tools**: Bump `agentmail-toolkit` version in `package.json`, run `pnpm install`, rebuild
+Then in Claude Desktop: Settings → Connectors → Add → URL = `https://YOUR-NGROK.ngrok-free.dev/mcp`. Claude Desktop will run the OAuth flow automatically.
 
 ## Deployment & CI/CD
 
-This server is deployed to [Manufact Cloud](https://manufact.com). There are two deployment methods:
+### Branch deploys (preview)
 
-### Option A: CLI Deployment
+Push to any non-main branch → Manufact creates a preview deployment at a unique URL. Use these to verify changes before merging.
 
-```bash
-# Install the mcp-use CLI
-npm install -g @mcp-use/cli
+### Production deploy
 
-# Login to Manufact
-mcp-use login
+Push to `main` → automatic deploy to `mcp.agentmail.to`.
 
-# Deploy
-mcp-use deploy
-```
+### Required production env vars in Manufact dashboard
 
-### Option B: GitHub Repo Connection
+For the OAuth path to work in prod, set these on the production deployment:
 
-Connect your GitHub repo on [manufact.com](https://manufact.com) for automatic deployments with observability, metrics, logs, and branch-deployments.
+- `CLERK_PUBLISHABLE_KEY` (prod `pk_live_...`)
+- `CLERK_SECRET_KEY` (prod `sk_live_...`)
+- `CONSOLE_JWT_PRIVATE_KEY` (prod ES256 PEM)
+- `AGENTMAIL_API_URL=https://api.agentmail.to`
+- `MCP_PUBLIC_URL=https://mcp.agentmail.to` (preview deploys: `https://<preview-id>.run.mcp-use.com`)
 
-### Post-Deployment
-
-After deployment, your MCP server is accessible at the URL provided by Manufact (e.g., `https://your-deployment-id.deploy.mcp-use.com/mcp`).
-
-**DNS/CNAME**: If migrating from a previous host, update your CNAME records to point to the new Manufact URL.
-
-### Environment Variables
-
-Set these in Manufact's dashboard:
-
-- `PORT`: Automatically injected by Manufact
-- `AGENTMAIL_API_KEY`: Optional fallback API key (users typically pass their own via query params)
-- `AGENTMAIL_BASE_URL`: Optional, only if targeting a non-production AgentMail API
+`PORT` is auto-injected. `AGENTMAIL_API_KEY` is optional (most users pass per-request).
 
 ## Troubleshooting
 
-### Port Issues
+### OAuth path returns 500
 
-- Default port is **3000**
-- Kill existing process: `lsof -ti:3000 | xargs kill`
+- Check `CONSOLE_JWT_PRIVATE_KEY` is set and is valid ES256 PEM (multi-line).
+- Check `AGENTMAIL_API_URL` is set and reachable.
+- Check the Clerk user has at least one org membership.
+- `/health` endpoint reports whether Clerk is enabled and which AgentMail URL is in use.
 
-### Build Issues
+### `/v0/auth/internal-org` 401 / 404
 
-```bash
-# Check for TypeScript errors without emitting
-npx tsc --noEmit
+- 401: `CONSOLE_JWT_PRIVATE_KEY` doesn't match the backend's expected public key for that environment. Verify you're using the right key for staging vs prod.
+- 404: The Clerk org has never been registered with the AgentMail backend. The user needs to log into the console (any environment) at least once to bootstrap.
 
-# Clean rebuild
-rm -rf build && pnpm run build
-```
+### Existing API-key clients suddenly broken after this version
 
-### Import Issues
+They shouldn't be — the API key path takes priority over OAuth. If a request has `?apiKey=` or `x-api-key`, Clerk is never consulted. If you see breakage, file a bug with the request URL + headers.
 
-- Ensure you're in the project root directory
-- Run `pnpm install` to install dependencies
-- Check that your TypeScript configuration is correct
-- Verify Node.js version is 18 or higher
+### Other issues
 
-### TypeScript Issues
-
-- Ensure all imports use `.js` extensions (TypeScript + ESM requirement for NodeNext module resolution)
-- Check that `package.json` has `"type": "module"`
-
-### API Key Issues
-
-- Verify your API key is valid at [console.agentmail.to](https://console.agentmail.to)
-- Check that the key is being passed correctly (query param, header, or env var)
-- `initialize` and `tools/list` do not require an API key; only `tools/call` does
-
-### Dependency Security
-
-- All versions are pinned (no `^`) to prevent supply chain attacks
-- Always audit after install: `pnpm audit`
-- Use `pnpm install --frozen-lockfile` in CI/CD (Manufact’s build does this)
-- Check for unwanted transitive dependencies: `pnpm ls <package-name>`
+- Port: default 3000, kill via `lsof -ti:3000 | xargs kill`
+- Build: `npx tsc --noEmit` to check TS errors without emit
+- Imports: use `.js` extensions in imports (NodeNext / ESM requirement)
+- Pin all deps; audit after install: `pnpm audit`
 
 ## Resources
 
 - **AgentMail Docs**: [docs.agentmail.to](https://docs.agentmail.to)
 - **AgentMail Console**: [console.agentmail.to](https://console.agentmail.to)
 - **MCP Protocol**: [modelcontextprotocol.io](https://modelcontextprotocol.io)
+- **MCP OAuth spec (2025-06-18)**: [authorization](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization)
 - **MCP TypeScript SDK**: [github.com/modelcontextprotocol/typescript-sdk](https://github.com/modelcontextprotocol/typescript-sdk)
+- **@clerk/mcp-tools**: [github.com/clerk/mcp-tools](https://github.com/clerk/mcp-tools)
+- **Clerk MCP guide (Express)**: [clerk.com/docs/expressjs/guides/ai/mcp/build-mcp-server](https://clerk.com/docs/expressjs/guides/ai/mcp/build-mcp-server)
 - **Manufact Cloud**: [manufact.com](https://manufact.com)
-- **mcp-use CLI**: [npmjs.com/package/@mcp-use/cli](https://www.npmjs.com/package/@mcp-use/cli)
 - **Local MCP Server**: [github.com/agentmail-to/agentmail-mcp](https://github.com/agentmail-to/agentmail-mcp)
+- **Spike that proved this design**: `~/Desktop/AgentMail_Workplace/mcp-oauth-spike/`
