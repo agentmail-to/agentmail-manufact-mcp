@@ -169,14 +169,57 @@ async function getInternalOrganizationId(clerkOrgId: string): Promise<string> {
 }
 
 /**
- * Build an AgentMailClient backed by a console JWT for the user's first org.
+ * Extract the `org_id` claim from a Clerk OAuth access token.
  *
- * Clerk OAuth access tokens are user-scoped (no orgId), so we look up the
- * user's org memberships server-side and pick the first one. Per product
- * invariant, every user belongs to 1-2 orgs; multi-org selection is left
- * to a later iteration.
+ * Clerk surfaces the user's selected organization as the `org_id` claim
+ * when the OAuth app was granted the `user:org:read` scope AND the user
+ * picked an org on the consent screen (Clerk early-access feature, rolled
+ * out April 2026). The @clerk/mcp-tools mcpAuthClerk wrapper does NOT
+ * propagate this claim into the AuthInfo object — only userId is exposed
+ * via extra — so we decode the raw JWT payload ourselves.
+ *
+ * Returns undefined for tokens issued before user:org:read was enabled,
+ * tokens that omit the claim, or any decode failure. Callers must handle
+ * the undefined case via membership lookup, with a strict multi-org
+ * fallback to avoid silently picking the wrong org.
  */
-async function buildClientFromClerkUser(clerkUserId: string): Promise<AgentMailClient> {
+function extractOrgIdFromClerkToken(token: string | undefined): string | undefined {
+    if (!token) return undefined
+    try {
+        const parts = token.split('.')
+        if (parts.length < 2) return undefined
+        const payload = JSON.parse(Buffer.from(parts[1]!, 'base64').toString()) as Record<
+            string,
+            unknown
+        >
+        const orgId = payload.org_id
+        return typeof orgId === 'string' ? orgId : undefined
+    } catch {
+        return undefined
+    }
+}
+
+/**
+ * Build an AgentMailClient backed by a console JWT for the user's selected org.
+ *
+ * Selection rules:
+ *   1. If `selectedClerkOrgId` is provided (token carried an `org_id` claim,
+ *      meaning the user explicitly chose this org on the Clerk consent
+ *      screen): use it. Validate the user is actually a member of that org
+ *      as a defensive check, in case the token was tampered with or the
+ *      user was removed from the org after the token was issued.
+ *   2. Else if the user belongs to exactly one org: use it. Backward-compat
+ *      path for single-org users (Clerk skips the selector for them) and
+ *      for tokens issued before the user:org:read scope rolled out.
+ *   3. Else (multi-org user, no org_id in token): refuse. Silently picking
+ *      memberships[0] is the data-corruption bug this change is fixing —
+ *      destructive ops (e.g. delete_inbox) could land in the wrong org.
+ *      Throw a clear error pointing the user at re-authentication.
+ */
+async function buildClientFromClerkUser(
+    clerkUserId: string,
+    selectedClerkOrgId?: string
+): Promise<AgentMailClient> {
     const memberships = await clerkClient.users.getOrganizationMembershipList({
         userId: clerkUserId,
     })
@@ -186,12 +229,36 @@ async function buildClientFromClerkUser(clerkUserId: string): Promise<AgentMailC
                 `Every AgentMail user is expected to belong to at least one org.`
         )
     }
-    const firstOrg = memberships.data[0]!.organization
-    const meta = firstOrg.publicMetadata as Record<string, unknown>
 
+    let chosenOrg
+    if (selectedClerkOrgId) {
+        // Path 1: token specified an org. Validate membership before trusting it.
+        const matching = memberships.data.find(
+            (m) => m.organization.id === selectedClerkOrgId
+        )
+        if (!matching) {
+            throw new Error(
+                `User ${clerkUserId} is not a member of organization ${selectedClerkOrgId}. ` +
+                    `Token claim does not match Clerk membership records.`
+            )
+        }
+        chosenOrg = matching.organization
+    } else if (memberships.data.length === 1) {
+        // Path 2: single-org user, no org_id in token. Safe to pick the only org.
+        chosenOrg = memberships.data[0]!.organization
+    } else {
+        // Path 3: multi-org user, no org_id in token. Refuse to guess.
+        throw new Error(
+            `User ${clerkUserId} belongs to ${memberships.data.length} organizations ` +
+                `but the access token did not specify which one. Please re-authenticate ` +
+                `and select an organization on the consent screen.`
+        )
+    }
+
+    const meta = chosenOrg.publicMetadata as Record<string, unknown>
     let internalOrgId = meta?.internalOrgId as string | undefined
     if (!internalOrgId) {
-        internalOrgId = await getInternalOrganizationId(firstOrg.id)
+        internalOrgId = await getInternalOrganizationId(chosenOrg.id)
     }
 
     const consoleJwt = await signConsoleJwt(internalOrgId)
@@ -224,7 +291,7 @@ function buildClientFromApiKey(apiKey: string): AgentMailClient {
 // ============================================================================
 
 type AuthSource =
-    | { kind: 'clerk'; clerkUserId: string }
+    | { kind: 'clerk'; clerkUserId: string; clerkOrgId?: string }
     | { kind: 'apiKey'; apiKey: string }
     | { kind: 'none' }
 
@@ -253,7 +320,7 @@ function createMcpServer(auth: AuthSource): McpServer {
             try {
                 let client: AgentMailClient
                 if (auth.kind === 'clerk') {
-                    client = await buildClientFromClerkUser(auth.clerkUserId)
+                    client = await buildClientFromClerkUser(auth.clerkUserId, auth.clerkOrgId)
                 } else if (auth.kind === 'apiKey') {
                     client = buildClientFromApiKey(auth.apiKey)
                 } else {
@@ -347,36 +414,19 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
             // getter function, but mcpAuthClerk has replaced req.auth with a
             // plain object, so getAuth() throws "TypeError: req.auth is not
             // a function". Read the userId directly from req.auth.extra.
-            const authInfo = (req as unknown as { auth?: { extra?: { userId?: string } } }).auth
+            const authInfo = (
+                req as unknown as { auth?: { token?: string; extra?: { userId?: string } } }
+            ).auth
             const userId = authInfo?.extra?.userId
-
-            // === SPIKE: identify org_id field in Clerk OAuth token ===
-            // Probing where Clerk surfaces the selected organization in the
-            // AuthInfo object after the consent-screen org selector is used.
-            // Remove once we know the field name (likely extra.orgId).
-            console.log(
-                '[oauth-org-spike]',
-                JSON.stringify(
-                    {
-                        authKeys: Object.keys((req as any).auth ?? {}),
-                        extra: (req as any).auth?.extra ?? null,
-                        scopes: (req as any).auth?.scopes ?? null,
-                        attempts: {
-                            'extra.orgId': (req as any).auth?.extra?.orgId,
-                            'extra.org_id': (req as any).auth?.extra?.org_id,
-                            'extra.organizationId': (req as any).auth?.extra?.organizationId,
-                            'orgId': (req as any).auth?.orgId,
-                            'org_id': (req as any).auth?.org_id,
-                        },
-                    },
-                    null,
-                    2
-                )
-            )
-            // === END SPIKE ===
-
+            // Clerk's user:org:read scope puts the user's selected org in the
+            // access token's `org_id` claim. The @clerk/mcp-tools wrapper
+            // doesn't surface it, so we decode the raw token. Falls back to
+            // undefined if the claim is missing — see buildClientFromClerkUser
+            // for how that case is handled (single-org auto-pick vs multi-org
+            // strict reject).
+            const clerkOrgId = extractOrgIdFromClerkToken(authInfo?.token)
             if (userId) {
-                req.authSource = { kind: 'clerk', clerkUserId: userId }
+                req.authSource = { kind: 'clerk', clerkUserId: userId, clerkOrgId }
             } else {
                 req.authSource = { kind: 'none' }
             }
@@ -474,8 +524,8 @@ app.all('/', authRouter, mcpHandler)
 
 // OAuth discovery metadata endpoints. Only mounted when Clerk is configured.
 if (CLERK_ENABLED) {
-    app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile'] }))
-    app.get('/.well-known/oauth-protected-resource', protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile'] }))
+    app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile', 'user:org:read'] }))
+    app.get('/.well-known/oauth-protected-resource', protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile', 'user:org:read'] }))
     app.get('/.well-known/oauth-authorization-server', authServerMetadataHandlerClerk)
 }
 
