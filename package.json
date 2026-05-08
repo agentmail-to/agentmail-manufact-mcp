@@ -30,6 +30,7 @@
     "pnpm": {
         "peerDependencyRules": {
             "ignoreMissing": ["pg", "redis", "better-sqlite3"]
-        }
+        },
+        "onlyBuiltDependencies": ["@clerk/shared"]
     }
 }
