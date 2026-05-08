@@ -31,6 +31,9 @@
         "peerDependencyRules": {
             "ignoreMissing": ["pg", "redis", "better-sqlite3"]
         },
-        "onlyBuiltDependencies": ["@clerk/shared"]
+        "onlyBuiltDependencies": ["@clerk/shared"],
+        "allowBuilds": {
+            "@clerk/shared": true
+        }
     }
 }
