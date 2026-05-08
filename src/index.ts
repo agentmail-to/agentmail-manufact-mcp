@@ -349,6 +349,32 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
             // a function". Read the userId directly from req.auth.extra.
             const authInfo = (req as unknown as { auth?: { extra?: { userId?: string } } }).auth
             const userId = authInfo?.extra?.userId
+
+            // === SPIKE: identify org_id field in Clerk OAuth token ===
+            // Probing where Clerk surfaces the selected organization in the
+            // AuthInfo object after the consent-screen org selector is used.
+            // Remove once we know the field name (likely extra.orgId).
+            console.log(
+                '[oauth-org-spike]',
+                JSON.stringify(
+                    {
+                        authKeys: Object.keys((req as any).auth ?? {}),
+                        extra: (req as any).auth?.extra ?? null,
+                        scopes: (req as any).auth?.scopes ?? null,
+                        attempts: {
+                            'extra.orgId': (req as any).auth?.extra?.orgId,
+                            'extra.org_id': (req as any).auth?.extra?.org_id,
+                            'extra.organizationId': (req as any).auth?.extra?.organizationId,
+                            'orgId': (req as any).auth?.orgId,
+                            'org_id': (req as any).auth?.org_id,
+                        },
+                    },
+                    null,
+                    2
+                )
+            )
+            // === END SPIKE ===
+
             if (userId) {
                 req.authSource = { kind: 'clerk', clerkUserId: userId }
             } else {
