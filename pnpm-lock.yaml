@@ -18,11 +18,11 @@ importers:
         specifier: 1.24.1
         version: 1.24.1(zod@4.1.13)
       agentmail:
-        specifier: 0.4.10
-        version: 0.4.10
+        specifier: 0.5.11
+        version: 0.5.11
       agentmail-toolkit:
-        specifier: 0.3.1
-        version: 0.3.1(@modelcontextprotocol/sdk@1.24.1(zod@4.1.13))
+        specifier: 0.4.0
+        version: 0.4.0(@modelcontextprotocol/sdk@1.24.1(zod@4.1.13))
       cors:
         specifier: 2.8.5
         version: 2.8.5
@@ -146,8 +146,8 @@ packages:
     resolution: {integrity: sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng==}
     engines: {node: '>= 0.6'}
 
-  agentmail-toolkit@0.3.1:
-    resolution: {integrity: sha512-7UOld9giaZZzy6O5pyQDoFAfqc2zIkU0eFU4/uolF9T7eTmUJZTntiYuhqyFo+Fs8jqrN3KdxAP6opdHLOtVPA==}
+  agentmail-toolkit@0.4.0:
+    resolution: {integrity: sha512-I+tfI3TDUFld+60XgFaryRrjy/JyVNNV69/cjWC6xtldarHqbCQ99Qnz5tVpAjwJNW0kI7lQFqMRKYL4EJ5A2Q==}
     peerDependencies:
       '@modelcontextprotocol/sdk': ^1.24.1
       ai: ^6.0.0-beta.150
@@ -163,8 +163,8 @@ packages:
       langchain:
         optional: true
 
-  agentmail@0.4.10:
-    resolution: {integrity: sha512-LXk2muMmXM58D5pSuDdGl2H2uoE72NEGTfPsJ1du4C53DRaxUL0yuA9tFInGvEm5E2MkdiG7Q3MMqjGHlj5vBw==}
+  agentmail@0.5.11:
+    resolution: {integrity: sha512-va5OoAmhlecOcn6vfXMN1mBc5r6KMqPtUC36K18Ra74DU5/LY/0ckT7ZM9VwVbDN7uPBNrL4a5aI1fLtH98hEg==}
     engines: {node: '>=18.0.0'}
 
   ajv-formats@3.0.1:
@@ -707,9 +707,9 @@ snapshots:
       mime-types: 3.0.2
       negotiator: 1.0.0
 
-  agentmail-toolkit@0.3.1(@modelcontextprotocol/sdk@1.24.1(zod@4.1.13)):
+  agentmail-toolkit@0.4.0(@modelcontextprotocol/sdk@1.24.1(zod@4.1.13)):
     dependencies:
-      agentmail: 0.4.10
+      agentmail: 0.5.11
       jszip: 3.10.1
       unpdf: 1.4.0
       zod: 4.1.13
@@ -720,7 +720,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  agentmail@0.4.10:
+  agentmail@0.5.11:
     dependencies:
       ws: 8.20.0
     transitivePeerDependencies:

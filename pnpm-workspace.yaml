@@ -1,14 +1,4 @@
-# pnpm 11+ moved settings out of .npmrc and the `pnpm` field in package.json
-# into this file. `allowBuilds` is the v11 replacement for the now-removed
-# onlyBuiltDependencies / neverBuiltDependencies / ignoredBuiltDependencies.
-#
-# By default pnpm 11 refuses to run any dependency lifecycle script (postinstall,
-# preinstall, etc) unless explicitly allowed here. Without this, `pnpm install`
-# fails with ERR_PNPM_IGNORED_BUILDS in CI (Manufact uses pnpm 11.0.8 via corepack).
-#
-# Note: this file is for pnpm settings only. We are NOT a workspace; the
-# `packages` key is intentionally omitted.
-#
-# See: https://pnpm.io/settings#allowbuilds
-allowBuilds:
-  '@clerk/shared': true
+minimumReleaseAge: 1440
+minimumReleaseAgeExclude:
+  - agentmail
+  - agentmail-toolkit
