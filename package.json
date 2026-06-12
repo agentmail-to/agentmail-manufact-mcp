@@ -12,8 +12,8 @@
         "@clerk/express": "2.1.5",
         "@clerk/mcp-tools": "0.3.1",
         "@modelcontextprotocol/sdk": "1.24.1",
-        "agentmail": "0.4.10",
-        "agentmail-toolkit": "0.3.1",
+        "agentmail": "0.5.11",
+        "agentmail-toolkit": "0.4.0",
         "cors": "2.8.5",
         "express": "5.2.1",
         "jose": "5.9.6",
@@ -29,7 +29,11 @@
     },
     "pnpm": {
         "peerDependencyRules": {
-            "ignoreMissing": ["pg", "redis", "better-sqlite3"]
+            "ignoreMissing": [
+                "pg",
+                "redis",
+                "better-sqlite3"
+            ]
         }
     }
 }
