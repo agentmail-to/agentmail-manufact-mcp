@@ -35,6 +35,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { SignJWT } from 'jose'
 import crypto from 'node:crypto'
+import { z } from 'zod'
 
 // ============================================================================
 // Config
@@ -199,24 +200,44 @@ function extractOrgIdFromClerkToken(token: string | undefined): string | undefin
     }
 }
 
+// Clerk user privateMetadata key that stores the org a multi-org user selected
+// via the `select_organization` MCP tool. privateMetadata (not public) because
+// it's an internal routing setting, never exposed to the frontend or the token.
+const MCP_SELECTED_ORG_KEY = 'mcpSelectedOrgId'
+
+/** Read the user's previously-selected org id from Clerk privateMetadata. */
+async function getStoredMcpOrgId(clerkUserId: string): Promise<string | undefined> {
+    const user = await clerkClient.users.getUser(clerkUserId)
+    const stored = (user.privateMetadata as Record<string, unknown>)?.[MCP_SELECTED_ORG_KEY]
+    return typeof stored === 'string' && stored ? stored : undefined
+}
+
+/** Persist the user's org selection to Clerk privateMetadata. */
+async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<void> {
+    await clerkClient.users.updateUserMetadata(clerkUserId, {
+        privateMetadata: { [MCP_SELECTED_ORG_KEY]: orgId },
+    })
+}
+
 /**
  * Build an AgentMailClient backed by a console JWT for the user's selected org.
  *
- * Selection rules:
- *   1. If `selectedClerkOrgId` is provided (token carried an `org_id` claim,
- *      meaning the user explicitly chose this org on the Clerk consent
- *      screen): use it. Validate the user is actually a member of that org
- *      as a defensive check, in case the token was tampered with or the
- *      user was removed from the org after the token was issued.
- *   2. Else if the user belongs to exactly one org: use it. Backward-compat
- *      path for single-org users (Clerk skips the selector for them) and
- *      for tokens issued before the user:org:read scope rolled out.
- *   3. Else (multi-org user, no org_id in token): refuse. Silently picking
- *      memberships[0] is the data-corruption bug this change is fixing —
- *      destructive ops (e.g. delete_inbox) could land in the wrong org.
- *      Throw a clear error pointing the user at the API key path (multi-org
- *      consent selection is unavailable until Clerk grants org scopes to DCR
- *      clients — see the PRM scopes_supported comment in the route mount).
+ * Selection rules (in precedence order):
+ *   1. If `selectedClerkOrgId` is provided (token carried an `org_id` claim —
+ *      the user picked an org on the Clerk consent screen): use it. Validate
+ *      membership defensively. Currently only Claude's privileged app can emit
+ *      this; DCR clients never do (Clerk doesn't grant them user:org:read).
+ *   2. Else if the user belongs to exactly one org: use it (single-org users
+ *      never need to choose).
+ *   3. Else (multi-org user) consult the org they picked via `select_organization`
+ *      (stored in Clerk privateMetadata). If set and still a valid membership,
+ *      use it.
+ *   4. Else: refuse. Silently picking memberships[0] could land destructive ops
+ *      (e.g. delete_inbox) in the wrong org. Throw a clear error listing the
+ *      orgs and telling the user to call `select_organization` first.
+ *
+ * This makes multi-org work for every client (Claude/Cursor/Codex) without
+ * depending on the Clerk consent-screen org picker or per-client UA hacks.
  */
 async function buildClientFromClerkUser(
     clerkUserId: string,
@@ -246,19 +267,25 @@ async function buildClientFromClerkUser(
         }
         chosenOrg = matching.organization
     } else if (memberships.data.length === 1) {
-        // Path 2: single-org user, no org_id in token. Safe to pick the only org.
+        // Path 2: single-org user. Safe to pick the only org.
         chosenOrg = memberships.data[0]!.organization
     } else {
-        // Path 3: multi-org user, no org_id in token. Refuse to guess.
-        // NOTE: multi-org consent selection is not currently available — see the
-        // PRM scopes_supported comment in the route mount. Direct the user at
-        // the API key path until Clerk grants org scopes to DCR clients.
-        throw new Error(
-            `User ${clerkUserId} belongs to ${memberships.data.length} organizations. ` +
-                `OAuth multi-org selection is temporarily unavailable. ` +
-                `Please use an API key from https://console.agentmail.to to access ` +
-                `a specific organization.`
-        )
+        // Path 3/4: multi-org user, no org_id in token. Use the org they picked
+        // via `select_organization`; otherwise refuse and tell them to pick one.
+        const storedOrgId = await getStoredMcpOrgId(clerkUserId)
+        const matching = storedOrgId
+            ? memberships.data.find((m) => m.organization.id === storedOrgId)
+            : undefined
+        if (!matching) {
+            const orgList = memberships.data
+                .map((m) => `  - ${m.organization.name} (${m.organization.id})`)
+                .join('\n')
+            throw new Error(
+                `You belong to ${memberships.data.length} organizations and haven't selected one yet. ` +
+                    `Call the \`select_organization\` tool with one of these, then retry:\n${orgList}`
+            )
+        }
+        chosenOrg = matching.organization
     }
 
     const meta = chosenOrg.publicMetadata as Record<string, unknown>
@@ -355,6 +382,100 @@ function createMcpServer(auth: AuthSource): McpServer {
                 }
             }
         })
+    }
+
+    // Org-selection tools (Clerk OAuth only). Let a multi-org user choose which
+    // org their mail operations target, without relying on the Clerk consent
+    // picker (which DCR clients can't use) or any per-client UA hack. The choice
+    // persists in Clerk privateMetadata and applies to all future requests until
+    // changed. See buildClientFromClerkUser path 3/4.
+    if (CLERK_ENABLED) {
+        const NON_CLERK_MSG =
+            'Organization selection only applies to OAuth (Clerk) sessions. ' +
+            "API-key requests are already scoped to that key's organization."
+
+        server.registerTool(
+            'list_organizations',
+            {
+                title: 'List organizations',
+                description:
+                    'List the organizations you belong to and show which one is currently ' +
+                    'selected for AgentMail operations. Use `select_organization` to change it.',
+            },
+            async () => {
+                if (auth.kind !== 'clerk') {
+                    return { content: [{ type: 'text' as const, text: NON_CLERK_MSG }] }
+                }
+                const memberships = await clerkClient.users.getOrganizationMembershipList({
+                    userId: auth.clerkUserId,
+                })
+                const selected = await getStoredMcpOrgId(auth.clerkUserId)
+                const lines = (memberships.data ?? []).map((m) => {
+                    const o = m.organization
+                    return `- ${o.name} (${o.id})${o.id === selected ? '  ← selected' : ''}`
+                })
+                const text = lines.length
+                    ? `Your organizations:\n${lines.join('\n')}\n\n` +
+                      'Use `select_organization` with a name or ID to choose.'
+                    : 'You have no organization memberships.'
+                return { content: [{ type: 'text' as const, text }] }
+            }
+        )
+
+        server.registerTool(
+            'select_organization',
+            {
+                title: 'Select organization',
+                description:
+                    'Choose which organization your AgentMail operations target (for users who ' +
+                    'belong to multiple orgs). Accepts an organization name or ID. The choice ' +
+                    'persists across sessions until you change it.',
+                inputSchema: {
+                    organization: z
+                        .string()
+                        .describe('Organization name or ID (see `list_organizations`)'),
+                },
+            },
+            async ({ organization }) => {
+                if (auth.kind !== 'clerk') {
+                    return { content: [{ type: 'text' as const, text: NON_CLERK_MSG }] }
+                }
+                const memberships = await clerkClient.users.getOrganizationMembershipList({
+                    userId: auth.clerkUserId,
+                })
+                const query = organization.trim().toLowerCase()
+                const match = (memberships.data ?? []).find(
+                    (m) =>
+                        m.organization.id.toLowerCase() === query ||
+                        m.organization.name.toLowerCase() === query
+                )
+                if (!match) {
+                    const orgList = (memberships.data ?? [])
+                        .map((m) => `  - ${m.organization.name} (${m.organization.id})`)
+                        .join('\n')
+                    return {
+                        content: [
+                            {
+                                type: 'text' as const,
+                                text: `No organization matching "${organization}". You belong to:\n${orgList}`,
+                            },
+                        ],
+                        isError: true,
+                    }
+                }
+                await setStoredMcpOrgId(auth.clerkUserId, match.organization.id)
+                return {
+                    content: [
+                        {
+                            type: 'text' as const,
+                            text:
+                                `Selected "${match.organization.name}" (${match.organization.id}). ` +
+                                'All future AgentMail operations will use this organization.',
+                        },
+                    ],
+                }
+            }
+        )
     }
 
     return server
@@ -530,61 +651,23 @@ app.all('/', authRouter, mcpHandler)
 
 // OAuth discovery metadata endpoints. Only mounted when Clerk is configured.
 if (CLERK_ENABLED) {
-    // Per-client scope advertisement, keyed on User-Agent.
+    // Advertise only email/profile. We deliberately do NOT advertise
+    // `user:org:read`: Clerk grants dynamically-registered (DCR) clients only
+    // `email offline_access profile`, so any DCR client (Cursor, Codex, etc.)
+    // that requested the advertised user:org:read was rejected with
+    // invalid_scope at consent — broken OAuth onboarding since 2026-05-08.
     //
-    // Background: Clerk grants dynamically-registered (DCR) clients only
-    // `email offline_access profile`. A spec-compliant DCR client (Cursor,
-    // Codex, Manufact cloud, etc.) that sees user:org:read in scopes_supported
-    // requests it and gets rejected by Clerk with invalid_scope at the consent
-    // step — this broke OAuth onboarding for every non-Claude client since
-    // 2026-05-08. Claude is the exception: it authenticates through a
-    // privileged, pre-registered Clerk OAuth app that HAS user:org:read enabled,
-    // so for Claude the scope works and powers the multi-org consent picker.
-    //
-    // We can't satisfy both with one advertised list, and Clerk does not yet let
-    // DCR clients obtain org scopes (feature still unshipped as of 2026-06).
-    // So we split by client:
-    //   - Claude  → advertise user:org:read  → keeps the multi-org picker.
-    //   - Everyone else (and any UNKNOWN client) → email/profile only → no
-    //     invalid_scope. Multi-org over OAuth is unavailable for them (single-org
-    //     auto-picks via path 2; multi-org hits the path-3 reject + API key
-    //     fallback), which is the accepted trade-off until Clerk ships DCR org
-    //     scopes — at which point this whole split can be deleted.
-    //
-    // The default is the SAFE list (no org scope); we only add user:org:read when
-    // the request matches CLAUDE_OAUTH_UA_MATCH. Misclassifying Claude only
-    // degrades it to single-org/API-key (no hard break); misclassifying a DCR
-    // client as Claude would reintroduce invalid_scope for that client — so the
-    // matcher must stay specific to Claude's discovery User-Agent.
-    const CLAUDE_OAUTH_UA_MATCH = (process.env.CLAUDE_OAUTH_UA_MATCH || 'claude').toLowerCase()
-    const prmWithOrg = protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile', 'user:org:read'] })
-    const prmSafe = protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile'] })
-
-    // Identify the client from its discovery User-Agent. ONLY Claude gets the org
-    // scope (it's the only one that can actually obtain it). cursor/codex/other
-    // are named purely for observability — they all take the safe path and just
-    // connect (single-org). Claude's match is env-tunable in case its UA changes.
-    type OAuthClient = 'claude' | 'cursor' | 'codex' | 'other'
-    const classifyClient = (ua: string): OAuthClient => {
-        const u = ua.toLowerCase()
-        if (CLAUDE_OAUTH_UA_MATCH !== '' && u.includes(CLAUDE_OAUTH_UA_MATCH)) return 'claude'
-        if (u.includes('cursor')) return 'cursor'
-        if (u.includes('codex')) return 'codex'
-        return 'other'
-    }
-
-    const protectedResourceRouter: express.RequestHandler = (req, res) => {
-        const ua = (req.headers['user-agent'] || '').toString()
-        const client = classifyClient(ua)
-        const useOrgScope = client === 'claude'
-        // TEMPORARY: log client + UA + decision so we can confirm each client's
-        // real discovery User-Agent in deploy logs, then lock CLAUDE_OAUTH_UA_MATCH.
-        console.log(`[prm] client=${client} ua=${JSON.stringify(ua)} -> ${useOrgScope ? 'with-org' : 'safe'}`)
-        return (useOrgScope ? prmWithOrg : prmSafe)(req, res)
-    }
-
-    app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceRouter)
-    app.get('/.well-known/oauth-protected-resource', protectedResourceRouter)
+    // Multi-org users no longer need the Clerk consent-screen org picker (which
+    // required user:org:read): they pick their org in-session via the
+    // `select_organization` MCP tool, which works for every client. See
+    // buildClientFromClerkUser path 3/4. (An earlier fix tried advertising the
+    // scope only to Claude via User-Agent; dropped because Claude's real
+    // discovery UA — python-httpx / empty / Chrome — isn't distinguishable.)
+    const protectedResourceHandler = protectedResourceHandlerClerk({
+        scopes_supported: ['email', 'profile'],
+    })
+    app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceHandler)
+    app.get('/.well-known/oauth-protected-resource', protectedResourceHandler)
     app.get('/.well-known/oauth-authorization-server', authServerMetadataHandlerClerk)
 }
 
