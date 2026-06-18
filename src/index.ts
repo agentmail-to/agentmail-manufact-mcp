@@ -560,13 +560,27 @@ if (CLERK_ENABLED) {
     const prmWithOrg = protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile', 'user:org:read'] })
     const prmSafe = protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile'] })
 
+    // Identify the client from its discovery User-Agent. ONLY Claude gets the org
+    // scope (it's the only one that can actually obtain it). cursor/codex/other
+    // are named purely for observability — they all take the safe path and just
+    // connect (single-org). Claude's match is env-tunable in case its UA changes.
+    type OAuthClient = 'claude' | 'cursor' | 'codex' | 'other'
+    const classifyClient = (ua: string): OAuthClient => {
+        const u = ua.toLowerCase()
+        if (CLAUDE_OAUTH_UA_MATCH !== '' && u.includes(CLAUDE_OAUTH_UA_MATCH)) return 'claude'
+        if (u.includes('cursor')) return 'cursor'
+        if (u.includes('codex')) return 'codex'
+        return 'other'
+    }
+
     const protectedResourceRouter: express.RequestHandler = (req, res) => {
         const ua = (req.headers['user-agent'] || '').toString()
-        const isClaude = CLAUDE_OAUTH_UA_MATCH !== '' && ua.toLowerCase().includes(CLAUDE_OAUTH_UA_MATCH)
-        // TEMPORARY: log UA + decision so we can confirm Claude's real
-        // discovery User-Agent in the deploy logs, then lock CLAUDE_OAUTH_UA_MATCH.
-        console.log(`[prm] ua=${JSON.stringify(ua)} match=${CLAUDE_OAUTH_UA_MATCH} -> ${isClaude ? 'with-org' : 'safe'}`)
-        return (isClaude ? prmWithOrg : prmSafe)(req, res)
+        const client = classifyClient(ua)
+        const useOrgScope = client === 'claude'
+        // TEMPORARY: log client + UA + decision so we can confirm each client's
+        // real discovery User-Agent in deploy logs, then lock CLAUDE_OAUTH_UA_MATCH.
+        console.log(`[prm] client=${client} ua=${JSON.stringify(ua)} -> ${useOrgScope ? 'with-org' : 'safe'}`)
+        return (useOrgScope ? prmWithOrg : prmSafe)(req, res)
     }
 
     app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceRouter)
