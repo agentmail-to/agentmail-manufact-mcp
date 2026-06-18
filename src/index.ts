@@ -214,7 +214,9 @@ function extractOrgIdFromClerkToken(token: string | undefined): string | undefin
  *   3. Else (multi-org user, no org_id in token): refuse. Silently picking
  *      memberships[0] is the data-corruption bug this change is fixing —
  *      destructive ops (e.g. delete_inbox) could land in the wrong org.
- *      Throw a clear error pointing the user at re-authentication.
+ *      Throw a clear error pointing the user at the API key path (multi-org
+ *      consent selection is unavailable until Clerk grants org scopes to DCR
+ *      clients — see the PRM scopes_supported comment in the route mount).
  */
 async function buildClientFromClerkUser(
     clerkUserId: string,
@@ -248,10 +250,14 @@ async function buildClientFromClerkUser(
         chosenOrg = memberships.data[0]!.organization
     } else {
         // Path 3: multi-org user, no org_id in token. Refuse to guess.
+        // NOTE: multi-org consent selection is not currently available — see the
+        // PRM scopes_supported comment in the route mount. Direct the user at
+        // the API key path until Clerk grants org scopes to DCR clients.
         throw new Error(
-            `User ${clerkUserId} belongs to ${memberships.data.length} organizations ` +
-                `but the access token did not specify which one. Please re-authenticate ` +
-                `and select an organization on the consent screen.`
+            `User ${clerkUserId} belongs to ${memberships.data.length} organizations. ` +
+                `OAuth multi-org selection is temporarily unavailable. ` +
+                `Please use an API key from https://console.agentmail.to to access ` +
+                `a specific organization.`
         )
     }
 
@@ -524,8 +530,17 @@ app.all('/', authRouter, mcpHandler)
 
 // OAuth discovery metadata endpoints. Only mounted when Clerk is configured.
 if (CLERK_ENABLED) {
-    app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile', 'user:org:read'] }))
-    app.get('/.well-known/oauth-protected-resource', protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile', 'user:org:read'] }))
+    // NOTE: user:org:read is intentionally NOT advertised. Clerk grants
+    // dynamically-registered (DCR) clients only `email offline_access profile`,
+    // so a spec-compliant client (Cursor, Codex, Manufact cloud, new Claude
+    // connections) that requested the advertised user:org:read was rejected by
+    // Clerk with invalid_scope at the consent step — breaking OAuth onboarding
+    // since 2026-05-08. Without the scope, tokens carry no org_id claim:
+    // single-org users take the safe auto-pick path and multi-org users hit the
+    // explicit path-3 reject (see buildClientFromClerkUser) and fall back to the
+    // API key path. Re-add only once Clerk can grant org scopes to DCR clients.
+    app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile'] }))
+    app.get('/.well-known/oauth-protected-resource', protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile'] }))
     app.get('/.well-known/oauth-authorization-server', authServerMetadataHandlerClerk)
 }
 
