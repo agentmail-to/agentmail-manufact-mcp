@@ -214,7 +214,9 @@ function extractOrgIdFromClerkToken(token: string | undefined): string | undefin
  *   3. Else (multi-org user, no org_id in token): refuse. Silently picking
  *      memberships[0] is the data-corruption bug this change is fixing —
  *      destructive ops (e.g. delete_inbox) could land in the wrong org.
- *      Throw a clear error pointing the user at re-authentication.
+ *      Throw a clear error pointing the user at the API key path (multi-org
+ *      consent selection is unavailable until Clerk grants org scopes to DCR
+ *      clients — see the PRM scopes_supported comment in the route mount).
  */
 async function buildClientFromClerkUser(
     clerkUserId: string,
@@ -248,10 +250,14 @@ async function buildClientFromClerkUser(
         chosenOrg = memberships.data[0]!.organization
     } else {
         // Path 3: multi-org user, no org_id in token. Refuse to guess.
+        // NOTE: multi-org consent selection is not currently available — see the
+        // PRM scopes_supported comment in the route mount. Direct the user at
+        // the API key path until Clerk grants org scopes to DCR clients.
         throw new Error(
-            `User ${clerkUserId} belongs to ${memberships.data.length} organizations ` +
-                `but the access token did not specify which one. Please re-authenticate ` +
-                `and select an organization on the consent screen.`
+            `User ${clerkUserId} belongs to ${memberships.data.length} organizations. ` +
+                `OAuth multi-org selection is temporarily unavailable. ` +
+                `Please use an API key from https://console.agentmail.to to access ` +
+                `a specific organization.`
         )
     }
 
@@ -524,8 +530,61 @@ app.all('/', authRouter, mcpHandler)
 
 // OAuth discovery metadata endpoints. Only mounted when Clerk is configured.
 if (CLERK_ENABLED) {
-    app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile', 'user:org:read'] }))
-    app.get('/.well-known/oauth-protected-resource', protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile', 'user:org:read'] }))
+    // Per-client scope advertisement, keyed on User-Agent.
+    //
+    // Background: Clerk grants dynamically-registered (DCR) clients only
+    // `email offline_access profile`. A spec-compliant DCR client (Cursor,
+    // Codex, Manufact cloud, etc.) that sees user:org:read in scopes_supported
+    // requests it and gets rejected by Clerk with invalid_scope at the consent
+    // step — this broke OAuth onboarding for every non-Claude client since
+    // 2026-05-08. Claude is the exception: it authenticates through a
+    // privileged, pre-registered Clerk OAuth app that HAS user:org:read enabled,
+    // so for Claude the scope works and powers the multi-org consent picker.
+    //
+    // We can't satisfy both with one advertised list, and Clerk does not yet let
+    // DCR clients obtain org scopes (feature still unshipped as of 2026-06).
+    // So we split by client:
+    //   - Claude  → advertise user:org:read  → keeps the multi-org picker.
+    //   - Everyone else (and any UNKNOWN client) → email/profile only → no
+    //     invalid_scope. Multi-org over OAuth is unavailable for them (single-org
+    //     auto-picks via path 2; multi-org hits the path-3 reject + API key
+    //     fallback), which is the accepted trade-off until Clerk ships DCR org
+    //     scopes — at which point this whole split can be deleted.
+    //
+    // The default is the SAFE list (no org scope); we only add user:org:read when
+    // the request matches CLAUDE_OAUTH_UA_MATCH. Misclassifying Claude only
+    // degrades it to single-org/API-key (no hard break); misclassifying a DCR
+    // client as Claude would reintroduce invalid_scope for that client — so the
+    // matcher must stay specific to Claude's discovery User-Agent.
+    const CLAUDE_OAUTH_UA_MATCH = (process.env.CLAUDE_OAUTH_UA_MATCH || 'claude').toLowerCase()
+    const prmWithOrg = protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile', 'user:org:read'] })
+    const prmSafe = protectedResourceHandlerClerk({ scopes_supported: ['email', 'profile'] })
+
+    // Identify the client from its discovery User-Agent. ONLY Claude gets the org
+    // scope (it's the only one that can actually obtain it). cursor/codex/other
+    // are named purely for observability — they all take the safe path and just
+    // connect (single-org). Claude's match is env-tunable in case its UA changes.
+    type OAuthClient = 'claude' | 'cursor' | 'codex' | 'other'
+    const classifyClient = (ua: string): OAuthClient => {
+        const u = ua.toLowerCase()
+        if (CLAUDE_OAUTH_UA_MATCH !== '' && u.includes(CLAUDE_OAUTH_UA_MATCH)) return 'claude'
+        if (u.includes('cursor')) return 'cursor'
+        if (u.includes('codex')) return 'codex'
+        return 'other'
+    }
+
+    const protectedResourceRouter: express.RequestHandler = (req, res) => {
+        const ua = (req.headers['user-agent'] || '').toString()
+        const client = classifyClient(ua)
+        const useOrgScope = client === 'claude'
+        // TEMPORARY: log client + UA + decision so we can confirm each client's
+        // real discovery User-Agent in deploy logs, then lock CLAUDE_OAUTH_UA_MATCH.
+        console.log(`[prm] client=${client} ua=${JSON.stringify(ua)} -> ${useOrgScope ? 'with-org' : 'safe'}`)
+        return (useOrgScope ? prmWithOrg : prmSafe)(req, res)
+    }
+
+    app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceRouter)
+    app.get('/.well-known/oauth-protected-resource', protectedResourceRouter)
     app.get('/.well-known/oauth-authorization-server', authServerMetadataHandlerClerk)
 }
 
